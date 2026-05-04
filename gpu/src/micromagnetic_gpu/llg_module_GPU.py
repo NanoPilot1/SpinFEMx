@@ -353,7 +353,7 @@ class EffectiveField:
             kwargs = {} if demag_kwargs is None else dict(demag_kwargs)
 
             if method in ["fmm", "jaxfmm"]:
-                from .Demag_FMM_JAX_GPU import DemagFieldFMMJAXGPU
+                from .Demag_FMM_GPU import DemagFieldFMMJAXGPU
 
                 mem_limit = kwargs.pop("mem_limit", 4_000_000)
 
