@@ -85,8 +85,8 @@ Aex = 13.0e-12
 llg = LLG_GPU(mesh, Ms = Ms, gamma=2.211e5, alpha=0.5, do_precess=0)
 
 llg.add_exchange(Aex=Aex)
-llg.add_demag(method="lindholm_gpu")
-#llg.add_demag(method="fmm")
+#llg.add_demag(method="lindholm_gpu")
+llg.add_demag(method="fmm")
 
 # 5. Time stepping setup (relaxation with stopping criterion)
 
@@ -105,7 +105,8 @@ y, ctx, elapsed = llg.relax(
     dt_init,
     dt_save=dt_print,
     dt_snap=dt_snap,
-    output_dir="relax_lindholm_gpu",
+    output_dir="relax_fmm_gpu",
+    #output_dir="relax_lindholm_gpu",
     ts_rtol=1.0e-6,
     ts_atol=1.0e-6,
     save_final_state=True, # writes a checkpoint (.bp) for reuse in subsequent simulations
