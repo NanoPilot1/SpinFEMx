@@ -14,7 +14,10 @@ Implemented magnetic interactions and physical effects:
 - Interfacial DMI with an arbitrary symmetry-breaking axis
 - Cubic Anisotropy
 - Space-dependent external magnetic field
-- Magnetostatic interaction (experimental; computed via a hybrid FEM–BEM approach using bempp-cl)
+- Magnetostatic interaction
+  - Hybrid FEM-BEM solver based on BEM++/bempp-cl
+  - Lindholm analytical formulation for the double-layer boundary operator
+  - Htool-compressed Lindholm operator for scalable large-scale FEM-BEM simulations (requires PETSc built from source with Htool support enabled)
 - Spin-transfer torque (Zhang–Li model)
 
 The LLG equation is integrated in time using PETSc TS (Time Stepping ODE and DAE Solvers).  
