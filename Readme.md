@@ -56,7 +56,7 @@ This installation is CPU-only and does **not** provide Htool support.
 
 ## CPU Docker image
 
-For simulations requiring the optional Htool/H-matrix demagnetizing-field backend, use the CPU Docker image.
+For simulations requiring the optional Htool/H-matrix demagnetizing-field backend, use the CPU Docker image. This image is intended for CPU/MPI simulations that require PETSc built with Htool support.
 
 Build the image from the repository root:
 
@@ -74,8 +74,7 @@ docker run -it \
   mpiexec --allow-run-as-root -n <core_number> python script.py
 ```
 
-This image is intended for CPU/MPI simulations that require PETSc built with Htool support.
----
+
 
 ## GPU Docker image
 
