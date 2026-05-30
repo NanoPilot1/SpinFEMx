@@ -1,12 +1,29 @@
+# Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.egg-info/
-dist/
 build/
-.venv/
-venv/
-.env
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Jupyter
 .ipynb_checkpoints/
+
+# Generated outputs
+*.log
+results/
+outputs/
+checkpoints/
+
+# Visualization and simulation outputs
+*.bp/
+*.bp.dir/
+*.vtu
+*.pvtu
+*.pvd
+
+# Operating system and editors
 .DS_Store
+.vscode/
+.idea/
