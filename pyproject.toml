@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fenicsx-micromagnetics"
+version = "0.1.0"
+description = "Micromagnetic simulations with FEniCSx"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+authors = [
+    { name = "NanoPilot1" }
+]
+
+dependencies = [
+    "numpy>=1.23",
+    "scipy",
+    "h5py",
+    "numba",
+    "meshio",
+    "pyvista",
+    "bempp-cl"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "black"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = [
+    "fenicsx_micromagnetics",
+    "fenicsx_micromagnetics.cpu",
+    "fenicsx_micromagnetics.cpu.*"
+]
+exclude = [
+    "fenicsx_micromagnetics.gpu",
+    "fenicsx_micromagnetics.gpu.*"
+]

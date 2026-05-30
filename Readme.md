@@ -4,57 +4,117 @@ This repository provides a research-oriented micromagnetic framework prototype (
 
 The repository contains two execution backends: a default CPU/MPI backend and GPU/CUDA backend. The CPU/MPI backend is the main implementation, while the GPU/CUDA backend has its Docker-based installation workflow.
 
-## Features
 
-Implemented magnetic interactions and physical effects:
+## Main features
 
-- Exchange interaction
-- Space-dependent uniaxial magnetic anisotropy
-- Bulk Dzyaloshinskii–Moriya interaction (DMI)
-- Interfacial DMI with an arbitrary symmetry-breaking axis
-- Cubic Anisotropy
-- Space-dependent external magnetic field
-- Magnetostatic interaction
-  - Hybrid FEM-BEM solver based on BEM++/bempp-cl
-  - Lindholm analytical formulation for the double-layer boundary operator
-  - Htool-compressed Lindholm operator for scalable large-scale FEM-BEM simulations (requires PETSc built from source with Htool support enabled)
-- Spin-transfer torque (Zhang–Li model)
+The CPU backend includes:
 
-The LLG equation is integrated in time using PETSc TS (Time Stepping ODE and DAE Solvers).  
-A Backward Differentiation Formula (BDF) scheme is employed for time integration.  
-The implementation supports MPI-based parallel execution.  
-For simplicity, the entire codebase is written in Python.
+- Exchange field
+- Uniaxial and cubic anisotropy
+- Bulk and interfacial DMI
+- Demagnetizing field using FEM/BEM approaches
+- LLG and LLG-STT solvers
+- Energy minimization tools
+- MPI-compatible workflows
+- ADIOS2/adios4dolfinx checkpointing
 
-## Software Requirements
+For larger CPU/MPI simulations, the CPU Docker image provides **PETSc with Htool support** for hierarchical-matrix acceleration of dense or boundary-integral components.
 
-To run the code, the following software is required:
+The GPU backend includes experimental CUDA-oriented implementations and computes the demagnetizing field using the FEM/BEM approach. Optionally, is possible to use **JAXFMM**, a third-party JAX-based fast multipole method library, that is useful por large system.
 
-- FEniCSx /dolfinx 0.9
-- adios4dolfinx
-- bempp-cl 0.4.2
-- MPICH (MPI implementation)
-- pyvista
-- numpy, scipy, pandas, h5py, numba
-- meshio
+---
 
-## Installation
 
-Create a conda environment and install dependencies:
+## CPU installation
 
+The recommended CPU installation uses `conda-forge`, because DOLFINx depends on MPI, PETSc and
+compiled C++ components.
+
+Create and activate the environment:
 
 ```bash
+conda create -n fenicsx-micromagnetics -c conda-forge \
+    python=3.12 \
+    fenics-dolfinx=0.10.* \
+    mpich \
+    pyvista \
+    adios4dolfinx=0.10.* \
+    numpy \
+    scipy \
+    h5py \
+    numba \
+    meshio \
+    pip
 
-conda create -n fenicsx-micromag python=3.10 -y
-conda activate fenicsx-micromag
+conda activate fenicsx-micromagnetics
+python -m pip install .
+```
 
-conda install -c conda-forge -y numpy scipy pandas h5py numba meshio pyvista mpich "fenics-dolfinx=0.9.*" adios4dolfinx
+This installation is CPU-only and does **not** provide Htool support.
 
-pip install bempp-cl
+---
 
-git clone https://github.com/NanoPilot1/Fenicsx-Micromagnetics.git
-cd Fenicsx-Micromagnetics/src/
-pip install -e 
+## CPU Docker image
 
- 
+For simulations requiring the optional Htool/H-matrix demagnetizing-field backend, use the CPU Docker image.
+
+Build the image from the repository root:
+
+```bash
+docker build -f docker/cpu/Dockerfile -t fenicsx-micromagnetics:cpu .
+```
+
+Run a simulation with MPI:
+
+```bash
+docker run -it \
+  -v "$PWD":/workspace \
+  -w /workspace \
+  fenicsx-micromagnetics:cpu \
+  mpiexec --allow-run-as-root -n <core_number> python script.py
+```
+
+This image is intended for CPU/MPI simulations that require PETSc built with Htool support.
+---
+
+## GPU Docker image
+
+The GPU Docker image provides CUDA, PETSc-CUDA, CuPy, JAX, and JAXFMM. Build from the root of the repository:
+
+```bash
+docker build -f docker/gpu/Dockerfile -t fenicsx-micromagnetics:gpu .
+```
 
 
+Run:
+
+```bash
+docker run --gpus all -it fenicsx-micromagnetics:gpu bash
+```
+
+## Dependencies
+
+The CPU backend requires a working FEniCSx/PETSc/MPI environment. The main dependencies are:
+
+- NumPy / SciPy
+- mpi4py / petsc4py
+- FEniCSx / DOLFINx
+- ADIOS2 with MPI support
+- adios4dolfinx
+- bempp-cl
+- PyVista / meshio
+
+The GPU backend additionally requires the third party libraties:
+
+- CUDA
+- PETSc built with CUDA support
+- CuPy
+- JAX
+- JAXFMM
+
+---
+
+
+## License
+
+This project is distributed under the license specified in the `LICENSE` file.
