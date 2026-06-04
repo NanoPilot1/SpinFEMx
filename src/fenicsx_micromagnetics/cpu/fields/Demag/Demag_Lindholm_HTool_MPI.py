@@ -883,7 +883,7 @@ class DemagField_Lindholm_HTool_MPI:
         htool_eta=2.0,
         htool_max_leaf_size=64,
         recompress_bool = 0,
-        Compressor_Algorithm = "sympartialaca",
+        Compressor_Algorithm = "fullaca",
         validate_htool=False,
         view_htool=False,
         htool_kernel_debug=False,
