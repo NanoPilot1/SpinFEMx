@@ -1,4 +1,7 @@
 import math
+import os
+from pathlib import Path
+
 import numpy as np
 import cupy as cp
 import ufl
@@ -19,6 +22,21 @@ except ImportError:
         DoubleLayerDenseOwnedRowsMPI,
         build_nullspace_per_component,
     )
+
+try:
+    from .lindholm_hmatrix_gpu.backend_fused import HMatrixGPUPackedFused
+    from .lindholm_hmatrix_gpu.builder import (
+        HMatrixBuildConfig,
+        build_or_load_hmatrix,
+        print_hmatrix_summary,
+    )
+    from .lindholm_hmatrix_gpu.entry_provider import LindholmEntryProviderCPU
+except ImportError as exc:
+    raise ImportError(
+        "No se pudo importar el backend comprimido Lindholm GPU ubicado en "
+        "'fields/lindholm_hmatrix_gpu'. Verifica que la carpeta exista y "
+        "contenga su archivo '__init__.py'."
+    ) from exc
 
 
 def _set_vec_cuda(vec: PETSc.Vec, block_size=None):
@@ -68,8 +86,12 @@ class DemagFieldLindholmGPU:
     -----
     - Matrices are assembled with DOLFINx on the host.
     - FEM matrices are converted to PETSc AIJCUSPARSE.
-    - The dense boundary operator B is assembled once on CPU and copied to CuPy.
-    - The per-step B @ u1_boundary multiplication runs on GPU.
+    - FEM matrices are converted to PETSc AIJCUSPARSE and remain on GPU.
+    - The Lindholm boundary operator can use:
+        * dense: the original dense GPU matrix;
+        * hmatrix: compressed near-field CSR + packed low-rank CUDA kernel;
+        * auto: dense below a configurable memory threshold, hmatrix otherwise.
+    - The per-step B @ u1_boundary multiplication remains entirely on GPU.
     - The implementation is intended first for single-GPU / one MPI rank.
       MPI support is possible but needs careful treatment of boundary reductions.
     """
@@ -91,6 +113,20 @@ class DemagFieldLindholmGPU:
         incident_policy="skip",
         volume_scale=1e27,
         B_dtype=np.float64,
+        boundary_backend="dense",
+        dense_gpu_max_bytes=512 * 1024**2,
+        hmatrix_cache_path=None,
+        hmatrix_cache_dir="./hmatrix_cache",
+        hmatrix_epsilon=1e-5,
+        hmatrix_eta=2.0,
+        hmatrix_leaf_size=64,
+        hmatrix_compressor="fullaca",
+        hmatrix_max_rank=None,
+        hmatrix_max_temporary_block_bytes=256 * 1024**2,
+        hmatrix_force_rebuild=False,
+        hmatrix_threads_per_block=128,
+        hmatrix_use_fp32=True,
+        hmatrix_verbose=True,
     ):
         self.mesh = mesh
         self.V = V
@@ -222,6 +258,11 @@ class DemagFieldLindholmGPU:
         # ------------------------------------------------------------
         # Lindholm B operator
         # ------------------------------------------------------------
+        #
+        # DoubleLayerDenseOwnedRowsMPI is reused only to construct boundary
+        # geometry and maps. For the compressed backend, do NOT call assemble():
+        # that method materializes the dense matrix and defeats the purpose of
+        # the H-matrix representation.
         self.opB = DoubleLayerDenseOwnedRowsMPI(
             mesh_par=mesh,
             V1_par=V1,
@@ -233,21 +274,160 @@ class DemagFieldLindholmGPU:
             incident_policy=incident_policy,
         )
 
-        self.opB.assemble(force=False)
+        if self.opB.nrows != self.opB.Nb:
+            raise RuntimeError(
+                "The current GPU Lindholm implementation expects one owned row "
+                "per boundary node in single-rank execution."
+            )
 
-        # Dense B block copied once to GPU.
-        self.B_gpu = cp.asarray(self.opB.Bloc,  dtype=self.B_dtype)
+        expected_rows = np.arange(self.opB.Nb, dtype=np.int32)
+        if not np.array_equal(self.opB.rows, expected_rows):
+            raise RuntimeError(
+                "Boundary rows are not the contiguous global ordering expected "
+                "by the single-rank GPU backend."
+            )
+
+        self.opB.diag_jump = (
+            self.opB.omega_sum / (4.0 * math.pi) - 1.0
+        ).astype(np.float64)
+
+        requested_backend = str(boundary_backend).strip().lower()
+        if requested_backend not in {"dense", "hmatrix", "auto"}:
+            raise ValueError(
+                "boundary_backend must be 'dense', 'hmatrix', or 'auto'."
+            )
+
+        dense_theoretical_bytes = (
+            int(self.opB.Nb) * int(self.opB.Nb) * np.dtype(self.B_dtype).itemsize
+        )
+
+        if requested_backend == "auto":
+            self.boundary_backend = (
+                "dense"
+                if dense_theoretical_bytes <= int(dense_gpu_max_bytes)
+                else "hmatrix"
+            )
+        else:
+            self.boundary_backend = requested_backend
+
+        self.B_dense_gpu = None
+        self.B_hmatrix_cpu = None
+        self.B_hmatrix_gpu = None
+        self.hmatrix_cache_path = None
+
+        if self.boundary_backend == "dense":
+            self.opB.assemble(force=False)
+            self.B_dense_gpu = cp.asarray(self.opB.Bloc, dtype=self.B_dtype)
+
+        else:
+            if np.dtype(self.B_dtype) != np.dtype(np.float64):
+                raise TypeError(
+                    "The packed fused H-matrix backend currently requires float64."
+                )
+
+            if hmatrix_cache_path is None:
+                cache_root = Path(
+                    os.environ.get("DEMAG_HMATRIX_CACHE_DIR", hmatrix_cache_dir)
+                )
+                cache_root.mkdir(parents=True, exist_ok=True)
+
+                mesh_tag = (
+                    str(cache_tag)
+                    if cache_tag is not None
+                    else Path(self.opB.serial_mesh_path).stem
+                )
+
+                eps_tag = f"{float(hmatrix_epsilon):.0e}".replace("+", "")
+                eta_tag = f"{float(hmatrix_eta):g}".replace(".", "p")
+
+                hmatrix_cache_path = cache_root / (
+                    f"{mesh_tag}_eps{eps_tag}_eta{eta_tag}_"
+                    f"leaf{int(hmatrix_leaf_size)}.npz"
+                )
+
+            self.hmatrix_cache_path = str(Path(hmatrix_cache_path))
+
+            provider = LindholmEntryProviderCPU.from_opB(self.opB)
+            config = HMatrixBuildConfig(
+                epsilon=float(hmatrix_epsilon),
+                eta=float(hmatrix_eta),
+                leaf_size=int(hmatrix_leaf_size),
+                compressor=str(hmatrix_compressor),
+                max_rank=hmatrix_max_rank,
+                max_temporary_block_bytes=int(
+                    hmatrix_max_temporary_block_bytes
+                ),
+            )
+
+            self.B_hmatrix_cpu = build_or_load_hmatrix(
+                cache_path=self.hmatrix_cache_path,
+                Xb=self.opB.Xb,
+                diag_jump=self.opB.diag_jump,
+                provider=provider,
+                config=config,
+                force_rebuild=bool(hmatrix_force_rebuild),
+                verbose=bool(hmatrix_verbose),
+            )
+
+            if hmatrix_verbose:
+                factor_precision = "FP32" if hmatrix_use_fp32 else "FP64"
+
+                print(
+                    "[Demag Lindholm HMatrixGPU] "
+                    f"low-rank factor precision={factor_precision}",
+                    flush=True,
+                )
+
+
+            self.B_hmatrix_gpu = HMatrixGPUPackedFused(
+                self.B_hmatrix_cpu,
+                threads_per_block=int(hmatrix_threads_per_block),
+                use_fp32=bool(hmatrix_use_fp32),
+            )
+
+            if hmatrix_verbose:
+                print_hmatrix_summary(
+                    self.B_hmatrix_cpu,
+                    prefix="[Demag Lindholm HMatrixGPU]",
+                )
+                self.B_hmatrix_gpu.print_memory_report(
+                    prefix="[Demag Lindholm HMatrixGPU]"
+                )
 
         self.xb_gpu = cp.zeros(self.opB.Nb, dtype=self.B_dtype)
 
-        self.bdofs_owned_gpu = cp.asarray(self.opB.bdofs_owned, dtype=cp.int32)
+        self.bdofs_owned_gpu = cp.asarray(
+            self.opB.bdofs_owned,
+            dtype=cp.int32,
+        )
 
         self.bidx_owned = self.opB.bidx_owned.astype(np.int32)
-        self.bidx_owned_gpu = cp.asarray(self.bidx_owned, dtype=cp.int32)
+        self.bidx_owned_gpu = cp.asarray(
+            self.bidx_owned,
+            dtype=cp.int32,
+        )
 
-        self.rowpos_for_bdof_gpu = cp.asarray(self.opB.rowpos_for_bdof, dtype=cp.int32)
-        self.boundary_dofs_gpu = cp.asarray(self.boundary_dofs, dtype=cp.int32)
-        self.y_rows_gpu = cp.empty(self.opB.nrows, dtype=self.B_dtype)
+        self.rowpos_for_bdof_gpu = cp.asarray(
+            self.opB.rowpos_for_bdof,
+            dtype=cp.int32,
+        )
+        self.boundary_dofs_gpu = cp.asarray(
+            self.boundary_dofs,
+            dtype=cp.int32,
+        )
+
+        # In single-rank mode, nrows == Nb. The H-matrix backend returns its
+        # result in the original global boundary ordering.
+        self.y_rows_gpu = cp.empty(self.opB.Nb, dtype=self.B_dtype)
+
+        if self.rank == 0:
+            dense_mib = dense_theoretical_bytes / 1024**2
+            print(
+                "[Demag Lindholm GPU] "
+                f"boundary_backend={self.boundary_backend}, "
+                f"Nb={self.opB.Nb}, dense_theoretical={dense_mib:.3f} MiB",
+                flush=True,
+            )
         # ------------------------------------------------------------
         # H = -grad(u1 + u2)
         # ------------------------------------------------------------
@@ -297,7 +477,17 @@ class DemagFieldLindholmGPU:
 
         self.xb_gpu[self.bidx_owned_gpu] = u1_cp[self.bdofs_owned_gpu]
 
-        cp.matmul(self.B_gpu, self.xb_gpu, out=self.y_rows_gpu)
+        if self.boundary_backend == "dense":
+            cp.matmul(
+                self.B_dense_gpu,
+                self.xb_gpu,
+                out=self.y_rows_gpu,
+            )
+        else:
+            self.B_hmatrix_gpu.matvec(
+                self.xb_gpu,
+                out=self.y_rows_gpu,
+            )
 
         g_cp = _vec_to_cupy(self.g_u2, "rw")
 
@@ -358,6 +548,40 @@ class DemagFieldLindholmGPU:
 
         if h_cp.size > self.local_size:
             h_cp[self.local_size :] = 0.0
+
+    def boundary_memory_report(self):
+        """
+        Return a compact memory report for the active boundary backend.
+        """
+        if self.boundary_backend == "dense":
+            nbytes = int(self.B_dense_gpu.nbytes)
+            return {
+                "backend": "dense",
+                "Nb": int(self.opB.Nb),
+                "accounted_gpu_bytes": nbytes,
+                "accounted_gpu_mib": nbytes / 1024**2,
+            }
+
+        report = self.B_hmatrix_gpu.memory_report()
+        report["Nb"] = int(self.opB.Nb)
+        report["cache_path"] = self.hmatrix_cache_path
+        return report
+
+    def print_boundary_memory_report(self):
+        report = self.boundary_memory_report()
+
+        if report["backend"] == "dense":
+            print(
+                "[Demag Lindholm GPU] "
+                f"backend=dense, Nb={report['Nb']}, "
+                f"GPU memory={report['accounted_gpu_mib']:.3f} MiB",
+                flush=True,
+            )
+            return
+
+        self.B_hmatrix_gpu.print_memory_report(
+            prefix="[Demag Lindholm HMatrixGPU]"
+        )
 
     def Energy_lumped_gpu(self, m_vec: PETSc.Vec, h_vec: PETSc.Vec):
         """
