@@ -107,6 +107,10 @@ class EffectiveField:
         )
         self.V1 = fem.functionspace(self.mesh, ("Lagrange", 1))
 
+        # Unique P1-node pairs connected by mesh edges.  The list is built
+        # once and reused only when writing monitoring information.
+        self.neighbor_pairs = self._build_neighbor_pairs()
+
         self.Ms = Ms
         self.gamma = gamma
         self.alpha = alpha
@@ -343,6 +347,78 @@ class EffectiveField:
         # silently reusing a field computed for a different magnetization.
         self._he_valid = False
         self._he_valid_signature = None
+
+    def _build_neighbor_pairs(self):
+        """
+        Build unique pairs of neighboring P1 nodes connected by mesh edges.
+
+        The P1 scalar space V1 and the blocked vector space V use the same
+        nodal ordering.  For each locally owned cell, every pair of cell
+        vertices is an edge candidate.  Duplicate pairs are removed locally.
+        A later MPI reduction is sufficient because only the global maximum
+        angle is required.
+        """
+        tdim = self.mesh.topology.dim
+        n_cells_local = self.mesh.topology.index_map(tdim).size_local
+
+        pairs = set()
+
+        for cell in range(n_cells_local):
+            dofs = self.V1.dofmap.cell_dofs(cell)
+
+            for a in range(len(dofs)):
+                for b in range(a + 1, len(dofs)):
+                    i = int(dofs[a])
+                    j = int(dofs[b])
+
+                    if i != j:
+                        pairs.add((min(i, j), max(i, j)))
+
+        if not pairs:
+            return np.empty((0, 2), dtype=np.int32)
+
+        return np.asarray(sorted(pairs), dtype=np.int32)
+
+    def max_neighbor_angle_deg(self, m=None):
+        """
+        Return the global maximum angle, in degrees, between neighboring
+        nodal magnetic moments.
+
+        Ghost values are synchronized before evaluating local mesh edges.
+        Zero-length moments are ignored defensively.
+        """
+        if m is None:
+            m = self.m
+
+        m.x.scatter_forward()
+        pairs = self.neighbor_pairs
+
+        if pairs.size == 0:
+            local_max = 0.0
+        else:
+            moments = m.x.array.reshape((-1, 3))
+
+            mi = moments[pairs[:, 0]]
+            mj = moments[pairs[:, 1]]
+
+            norm_i = np.linalg.norm(mi, axis=1)
+            norm_j = np.linalg.norm(mj, axis=1)
+
+            valid = (norm_i > 1e-14) & (norm_j > 1e-14)
+
+            if np.any(valid):
+                cosine = np.einsum(
+                    "ij,ij->i",
+                    mi[valid],
+                    mj[valid],
+                ) / (norm_i[valid] * norm_j[valid])
+
+                cosine = np.clip(cosine, -1.0, 1.0)
+                local_max = float(np.degrees(np.arccos(cosine)).max())
+            else:
+                local_max = 0.0
+
+        return float(self.comm.allreduce(local_max, op=MPI.MAX))
 
     def _field_energy_global(self, field, m, *, prefer_lumped=False):
 
@@ -1704,6 +1780,11 @@ class LLG:
                 Hext_local += hef_.H0_static  
                 Hext_all = mesh_.comm.gather(Hext_local, root=0)
 
+                # Spatial-resolution diagnostic: maximum angle between magnetic
+                # moments at neighboring mesh nodes.  Evaluated only when the
+                # monitor writes a log line.
+                max_neighbor_angle_deg = hef_.max_neighbor_angle_deg(hef_.m)
+
                 n_snap = int(np.trunc(t / dt_snap))
                 if n_snap != last_snap_n["n"]:
                     last_snap_n["n"] = n_snap
@@ -1752,6 +1833,7 @@ class LLG:
                             f"{'time':>10} {'dt':>10} {'<mx>':>15} {'<my>':>15} {'<mz>':>15} "
                             f"{'Hx_ext':>15} {'Hy_ext':>15} {'Hz_ext':>15} "
                             f"{'maxdmdt(deg/ns)':>18} {'max(mxh)':>15} "
+                            f"{'max_nn_angle(deg)':>18} "
                             f"{'E_demag':>15} {'E_exch':>15} {'E_ani':>15} "
                             f"{'E_dmi_bulk':>15} {'E_dmi_int':>15} {'E_cubic':>15}  {'E_total':>15}"
                         )
@@ -1765,6 +1847,7 @@ class LLG:
                         f"{mag[:,0].mean():15.6f} {mag[:,1].mean():15.6f} {mag[:,2].mean():15.6f} "
                         f"{Hx_ext_mean:15.6e} {Hy_ext_mean:15.6e} {Hz_ext_mean:15.6e} "
                         f"{maxdmdt_deg_ns:18.6e} {maxtorque:15.4e} "
+                        f"{max_neighbor_angle_deg:18.6f} "
                         f"{E_demag:15.4e} {E_exch:15.4e} {E_ani:15.4e} "
                         f"{E_db:15.4e} {E_di:15.4e} {E_cub:15.4e} {E_tot:15.4e}"
                     )
