@@ -417,6 +417,23 @@ class EffectiveField:
         self.local_dofs = self.end - self.start
         self.local_size = 3 * self.local_dofs
 
+        # Spatial-resolution diagnostic. Build the mesh-edge list only once.
+        # In the common single-rank GPU path, the edge endpoints are also kept
+        # on the device so max_neighbor_angle_deg_gpu() avoids CPU transfers.
+        self.neighbor_pairs_host = self._build_neighbor_pairs()
+        if self.comm.size == 1 and self.neighbor_pairs_host.size:
+            self.neighbor_i_gpu = cp.asarray(
+                self.neighbor_pairs_host[:, 0],
+                dtype=cp.int32,
+            )
+            self.neighbor_j_gpu = cp.asarray(
+                self.neighbor_pairs_host[:, 1],
+                dtype=cp.int32,
+            )
+        else:
+            self.neighbor_i_gpu = None
+            self.neighbor_j_gpu = None
+
 
         # Lumped nodal volumes (assembled once on DOLFINx layout)
 
@@ -656,6 +673,108 @@ class EffectiveField:
                 )
 
             self.H_demag_gpu = _dup_cuda_vec(template_out, block_size=3)
+
+
+    def _build_neighbor_pairs(self):
+        """
+        Build unique pairs of neighboring P1 nodes connected by mesh edges.
+
+        The scalar P1 space V1 and the blocked vector P1 space V share the same
+        nodal ordering. For tetrahedra this produces the six edges per cell;
+        duplicate edges are removed once during initialization.
+        """
+        tdim = self.mesh.topology.dim
+        cell_map = self.mesh.topology.index_map(tdim)
+        n_cells = int(cell_map.size_local + cell_map.num_ghosts)
+
+        chunks = []
+
+        for cell in range(n_cells):
+            dofs = np.asarray(self.V1.dofmap.cell_dofs(cell), dtype=np.int32)
+
+            if dofs.size < 2:
+                continue
+
+            ia, ib = np.triu_indices(dofs.size, k=1)
+            pairs = np.column_stack((dofs[ia], dofs[ib])).astype(
+                np.int32,
+                copy=False,
+            )
+            pairs.sort(axis=1)
+            chunks.append(pairs)
+
+        if not chunks:
+            return np.empty((0, 2), dtype=np.int32)
+
+        return np.unique(np.vstack(chunks), axis=0).astype(
+            np.int32,
+            copy=False,
+        )
+
+    def max_neighbor_angle_deg_gpu(self, m_vec: PETSc.Vec | None = None):
+        """
+        Return the global maximum angle, in degrees, between neighboring nodal
+        moments.
+
+        Single-rank execution stays entirely on GPU except for transferring the
+        final scalar maximum. The MPI fallback uses the host-side Function after
+        synchronizing ghost values.
+        """
+        if self.neighbor_pairs_host.size == 0:
+            return 0.0
+
+        if m_vec is None:
+            m_vec = self.m_gpu
+
+        if self.comm.size == 1:
+            m_all = _vec_to_cupy(m_vec, "r")
+            moments = m_all[: self.local_size].reshape((-1, 3))
+
+            mi = moments[self.neighbor_i_gpu]
+            mj = moments[self.neighbor_j_gpu]
+
+            dot = cp.sum(mi * mj, axis=1)
+            norm_product = cp.sqrt(
+                cp.sum(mi * mi, axis=1) * cp.sum(mj * mj, axis=1)
+            )
+
+            # Ignore defensively any zero-length vectors by assigning angle 0.
+            cosine = cp.where(
+                norm_product > 1e-30,
+                dot / norm_product,
+                1.0,
+            )
+            cosine = cp.clip(cosine, -1.0, 1.0)
+
+            local_max = float(
+                (cp.arccos(cosine) * (180.0 / np.pi)).max().item()
+            )
+            return local_max
+
+        # Conservative MPI fallback. This path is not used by the current
+        # single-GPU backend but keeps the diagnostic well-defined.
+        if m_vec is not self.m_gpu:
+            m_vec.copy(self.m_gpu)
+
+        self.sync_m_to_function()
+        self.m.x.scatter_forward()
+
+        moments = self.m.x.array.reshape((-1, 3))
+        pairs = self.neighbor_pairs_host
+
+        mi = moments[pairs[:, 0]]
+        mj = moments[pairs[:, 1]]
+
+        dot = np.einsum("ij,ij->i", mi, mj)
+        norm_product = np.linalg.norm(mi, axis=1) * np.linalg.norm(mj, axis=1)
+
+        cosine = np.ones_like(dot)
+        valid = norm_product > 1e-30
+        cosine[valid] = dot[valid] / norm_product[valid]
+        cosine = np.clip(cosine, -1.0, 1.0)
+
+        local_max = float(np.degrees(np.arccos(cosine)).max())
+        return float(self.comm.allreduce(local_max, op=MPI.MAX))
 
 
     # Host/device sync helpers
@@ -1692,6 +1811,9 @@ class LLG_GPU:
                 mag_local = hef_.m.x.array[: hef_.local_size].reshape((-1, 3))
                 mag = mesh_.comm.gather(mag_local, root=0)
 
+                # GPU spatial-resolution diagnostic, evaluated only at log time.
+                max_neighbor_angle_deg = hef_.max_neighbor_angle_deg_gpu(u)
+
                 n_snap = int(np.trunc(t / dt_snap))
                 if n_snap != last_snap_n["n"]:
                     last_snap_n["n"] = n_snap
@@ -1717,7 +1839,8 @@ class LLG_GPU:
                         header = (
                             f"{'time':>10} {'dt':>10} "
                             f"{'<mx>':>15} {'<my>':>15} {'<mz>':>15} "
-                            f"{'maxdmdt(deg/ns)':>18}"
+                            f"{'maxdmdt(deg/ns)':>18} "
+                            f"{'max_nn_angle(deg)':>18}"
                         )
                         print(header)
                         with open(log_path, "w") as f:
@@ -1729,7 +1852,8 @@ class LLG_GPU:
                         f"{mag[:,0].mean():15.6f} "
                         f"{mag[:,1].mean():15.6f} "
                         f"{mag[:,2].mean():15.6f} "
-                        f"{maxdmdt_deg_ns:18.6e}"
+                        f"{maxdmdt_deg_ns:18.6e} "
+                        f"{max_neighbor_angle_deg:18.6f}"
                     )
 
                     print(line)
@@ -2073,6 +2197,11 @@ class LLG_GPU:
                 # 3. Compute energies. The solution was already synchronized above.
                 m_fun = hef_.m
 
+                # GPU spatial-resolution diagnostic, evaluated only at log time.
+                max_neighbor_angle_deg = hef_.max_neighbor_angle_deg_gpu(
+                    hef_.m_gpu
+                )
+
                 energy = hef_.compute_Energy_terms(sync=False)
 
                 if hef_.demag_field is not None:
@@ -2118,6 +2247,7 @@ class LLG_GPU:
                             f"{'<mx>':>15} {'<my>':>15} {'<mz>':>15} "
                             f"{'Hx_ext':>15} {'Hy_ext':>15} {'Hz_ext':>15} "
                             f"{'maxdmdt(deg/ns)':>18} "
+                            f"{'max_nn_angle(deg)':>18} "
                             f"{'E_demag':>15} {'E_exch':>15} {'E_ani':>15} "
                             f"{'E_dmi_bulk':>15} {'E_dmi_int':>15} "
                             f"{'E_cubic':>15} {'E_total':>15}"
@@ -2138,6 +2268,7 @@ class LLG_GPU:
                         f"{Hext_mean[1]:15.6e} "
                         f"{Hext_mean[2]:15.6e} "
                         f"{maxdmdt_deg_ns:18.6e} "
+                        f"{max_neighbor_angle_deg:18.6f} "
                         f"{energy['E_demag']:15.4e} "
                         f"{energy['E_exch']:15.4e} "
                         f"{energy['E_ani']:15.4e} "
@@ -2340,7 +2471,7 @@ class LLG_GPU:
                 "# step method Hx Hy Hz "
                 "<mx> <my> <mz> "
                 "E_demag E_exch E_ani E_dmi_bulk E_dmi_int E_ext E_cubic E_total "
-                "max_projected_field maxdmdt_deg_ns "
+                "max_projected_field maxdmdt_deg_ns max_nn_angle_deg "
                 "iterations nsteps dt_last stop_reason elapsed "
                 "xdmf_step bp_step\n"
             )
@@ -2489,6 +2620,10 @@ class LLG_GPU:
 
             hef.sync_m_to_function()
 
+            max_neighbor_angle_deg = hef.max_neighbor_angle_deg_gpu(
+                hef.m_gpu
+            )
+
             m_local = hef.m.x.array[: hef.local_size].reshape((-1, 3))
 
             if m_local.size:
@@ -2606,6 +2741,7 @@ class LLG_GPU:
                 },
                 "max_projected_field": float(max_projected_field),
                 "maxdmdt_deg_ns": float(maxdmdt_deg_ns),
+                "max_nn_angle_deg": float(max_neighbor_angle_deg),
                 "iterations": int(iterations),
                 "nsteps": int(nsteps),
                 "dt_last": float(dt_last),
@@ -2634,6 +2770,7 @@ class LLG_GPU:
                 f"{energy['E_total']:+.8e} "
                 f"{max_projected_field:+.8e} "
                 f"{maxdmdt_deg_ns:+.8e} "
+                f"{max_neighbor_angle_deg:+.8e} "
                 f"{iterations:d} {nsteps:d} "
                 f"{dt_last:+.8e} "
                 f"{stop_reason} "
