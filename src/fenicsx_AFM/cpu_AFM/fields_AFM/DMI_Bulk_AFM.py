@@ -9,16 +9,12 @@ class DMIBulkField:
     Bulk Dzyaloshinskii-Moriya interaction for one AFM sublattice.
 
     Energy density
-    --------------
         e_DMI = D * m dot curl(m)
 
-    ``D`` is given in J/m^2. The same class is instantiated independently
+    D is given in J/m^2. The same class is instantiated independently
     for m1 and m2. For a compensated AFM with the same microscopic chirality
-    on both sublattices, use D1 = D2. Do not flip the sign merely because
-    m2 ~= -m1: the DMI energy is invariant under m -> -m.
+    on both sublattices, use D1 = D2.
 
-    The weak form mirrors the FM implementation and includes the natural
-    boundary term.
     """
 
     def __init__(self, mesh, V, D, Ms, Nodal_V, coordinate_scale_m=1e-9):
