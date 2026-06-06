@@ -563,7 +563,7 @@ class EffectiveFieldSTTGPU:
             pass
 
         # Host-side functions for I/O only
-        self.m = fem.Function(self.V)
+        self.m = fem.Function(self.V, name="f")
         self.dmdt = fem.Function(self.V)
         self.H_eff = fem.Function(self.V)
         self.H0_host = fem.Function(self.V)
@@ -602,12 +602,16 @@ class EffectiveFieldSTTGPU:
         # Matrix-free/local terms.  Nodal uniaxial anisotropy lives here when
         # fields/Anisotropy_GPU.py exposes compute_vec(...) instead of a PETSc K.
         self.local_terms = []
+        # CPU copies of the sparse field operators, summed once into a single
+        # combined matrix (self.K_lin) so the hot RHS/Jv path is one matvec.
+        cpu_lin_mats = []
 
         template_in = None
         template_out = None
 
         if abs(self.A) > 0.0:
             self.exchange_field = ExchangeField(self.mesh, self.V, self.A, self.Ms, volN)
+            cpu_lin_mats.append(self.exchange_field.K)
             self.exchange_field.K = _set_mat_cuda(self.exchange_field.K)
             buf = self.exchange_field.K.createVecLeft()
             _set_vec_cuda(buf, block_size=3)
@@ -620,6 +624,7 @@ class EffectiveFieldSTTGPU:
 
             if hasattr(self.anisotropy_field, "K"):
                 # Backward-compatible path for the old matrix-based anisotropy.
+                cpu_lin_mats.append(self.anisotropy_field.K)
                 self.anisotropy_field.K = _set_mat_cuda(self.anisotropy_field.K)
                 buf = self.anisotropy_field.K.createVecLeft()
                 _set_vec_cuda(buf, block_size=3)
@@ -647,6 +652,7 @@ class EffectiveFieldSTTGPU:
             if DMIBULK is None:
                 raise NotImplementedError("DMI_Bulk_GPU is not available. Provide it or set D_bulk=0.")
             self.DMIBULK = DMIBULK(self.mesh, self.V, self.V1, self.D_bulk, self.Ms, volN)
+            cpu_lin_mats.append(self.DMIBULK.K)
             self.DMIBULK.K = _set_mat_cuda(self.DMIBULK.K)
             buf = self.DMIBULK.K.createVecLeft()
             _set_vec_cuda(buf, block_size=3)
@@ -657,6 +663,7 @@ class EffectiveFieldSTTGPU:
 
         if abs(self.D_int) > 0.0:
             self.DMI_int = DMIInterfacial(self.mesh, self.V, self.V1, self.D_int, n0_int_vec, self.Ms, volN)
+            cpu_lin_mats.append(self.DMI_int.K)
             self.DMI_int.K = _set_mat_cuda(self.DMI_int.K)
             buf = self.DMI_int.K.createVecLeft()
             _set_vec_cuda(buf, block_size=3)
@@ -664,6 +671,33 @@ class EffectiveFieldSTTGPU:
             if template_in is None:
                 template_in = self.DMI_int.K.createVecRight()
                 template_out = self.DMI_int.K.createVecLeft()
+
+        # Sum sparse field operators only when more than one matrix-based
+        # interaction is active.  With a single sparse operator, reuse its
+        # existing CUDA matrix directly: creating K_lin as a copy would waste
+        # GPU memory without reducing the number of matvecs.
+        #
+        # Per-field CUDA matrices are retained because the field objects still
+        # use them for Energy()/compute() diagnostics.
+        if len(cpu_lin_mats) == 0:
+            self.K_lin = None
+
+        elif len(cpu_lin_mats) == 1:
+            # One sparse operator already implies one matvec in the hot path.
+            # Reuse the converted CUDA matrix instead of allocating a duplicate.
+            self.K_lin = self.linear_terms[0][1]
+
+        else:
+            # Multiple sparse operators: pay the one-time assembly cost to
+            # reduce every RHS/Jv evaluation to a single cuSPARSE matvec.
+            K_lin_cpu = cpu_lin_mats[0].copy()
+            for Kc in cpu_lin_mats[1:]:
+                K_lin_cpu.axpy(
+                    1.0,
+                    Kc,
+                    structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN,
+                )
+            self.K_lin = _set_mat_cuda(K_lin_cpu)
 
         # -------------------------------------------------------------
         # Zhang-Li GPU operator.
@@ -836,10 +870,10 @@ class EffectiveFieldSTTGPU:
         raise ValueError(f"Unsupported H_time_func output shape: {arr.shape}")
 
     def apply_linear_field_vec(self, x_vec: PETSc.Vec, out_vec: PETSc.Vec):
-        out_vec.zeroEntries()
-        for _, K, buf in self.linear_terms:
-            K.mult(x_vec, buf)
-            out_vec.axpy(1.0, buf)
+        if self.K_lin is not None:
+            self.K_lin.mult(x_vec, out_vec)
+        else:
+            out_vec.zeroEntries()
 
         for _, term, buf in self.local_terms:
             term.compute_vec(x_vec, buf)
@@ -1524,6 +1558,17 @@ class LLG_STT_GPU:
                     last_snap_n["n"] = n_snap
                     filename = Path(output_dir) / f"m_stt_bdf_{snap_counter['k']:03d}.xdmf"
                     snap_counter["k"] += 1
+
+                    try:
+                        mesh_.name = "Grid"
+                    except Exception:
+                        pass
+
+                    try:
+                        hef_.m.name = "f"
+                    except Exception:
+                        pass
+
                     with io.XDMFFile(mesh_.comm, str(filename), "w") as xdmf:
                         xdmf.write_mesh(mesh_)
                         xdmf.write_function(hef_.m)
@@ -1768,7 +1813,7 @@ class LLG_STT_GPU:
                         pass
 
                     try:
-                        hef_.m.name = "m"
+                        hef_.m.name = "f"
                     except Exception:
                         pass
 

@@ -408,7 +408,13 @@ class EffectiveField:
         self.Stab = self.Ms * self.gamma / (1.0 + self.alpha**2) * 0.5
 
         # Host-side Functions only for I/O / diagnostics.
-        self.m = fem.Function(self.V)
+
+        try:
+            self.mesh.name = "Grid"
+        except Exception:
+            pass
+
+        self.m = fem.Function(self.V, name="f")
         self.dmdt = fem.Function(self.V)
         self.H_eff = fem.Function(self.V)
         self.H0_host = fem.Function(self.V)
@@ -1819,6 +1825,17 @@ class LLG_GPU:
                     last_snap_n["n"] = n_snap
                     filename = Path(output_dir) / f"m_explicit_{snap_counter['k']:03d}.xdmf"
                     snap_counter["k"] += 1
+
+                    try:
+                        mesh_.name = "Grid"
+                    except Exception:
+                        pass
+
+                    try:
+                        hef_.m.name = "f"
+                    except Exception:
+                        pass
+
                     with io.XDMFFile(mesh_.comm, str(filename), "w") as xdmf:
                         xdmf.write_mesh(mesh_)
                         xdmf.write_function(hef_.m)
@@ -2225,6 +2242,17 @@ class LLG_GPU:
                     last_snap_n["n"] = n_snap
                     filename = Path(output_dir) / f"m{snap_counter['k']:03d}.xdmf"
                     snap_counter["k"] += 1
+
+                    try:
+                        mesh_.name = "Grid"
+                    except Exception:
+                        pass
+
+                    try:
+                        hef_.m.name = "f"
+                    except Exception:
+                        pass
+
                     with io.XDMFFile(mesh_.comm, str(filename), "w") as xdmf:
                         xdmf.write_mesh(mesh_)
                         xdmf.write_function(hef_.m)

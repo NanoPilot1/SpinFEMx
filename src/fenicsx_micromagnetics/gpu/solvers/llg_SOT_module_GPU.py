@@ -515,7 +515,7 @@ class EffectiveFieldSOTGPU:
             pass
 
         # Host-side functions used only for I/O and selected diagnostics.
-        self.m = fem.Function(self.V, name="m")
+        self.m = fem.Function(self.V, name="f")
         self.dmdt = fem.Function(self.V, name="dmdt")
         self.H_eff = fem.Function(self.V, name="H_eff")
 
@@ -1385,6 +1385,17 @@ class LLG_SOT_GPU:
                 last_snap_n["n"] = n_snap
                 filename = Path(output_dir) / f"m_sot_{prefix}_{snap_counter['k']:03d}.xdmf"
                 snap_counter["k"] += 1
+
+                try:
+                    mesh_.name = "Grid"
+                except Exception:
+                    pass
+
+                try:
+                    hef_.m.name = "f"
+                except Exception:
+                    pass
+
                 with io.XDMFFile(mesh_.comm, str(filename), "w") as xdmf:
                     xdmf.write_mesh(mesh_)
                     xdmf.write_function(hef_.m)
