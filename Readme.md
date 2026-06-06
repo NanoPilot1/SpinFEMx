@@ -13,7 +13,7 @@ The CPU backend includes:
 - Uniaxial and cubic anisotropy
 - Bulk and interfacial DMI
 - Demagnetizing field using FEM/BEM approaches
-- LLG and LLG-STT solvers
+- LLG and LLG-STT solvers (SOT and Zhang-Li Model)
 - Energy minimization tools
 - MPI-compatible workflows
 - ADIOS2/adios4dolfinx checkpointing
