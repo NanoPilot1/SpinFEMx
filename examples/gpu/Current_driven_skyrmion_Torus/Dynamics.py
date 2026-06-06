@@ -96,7 +96,7 @@ Jvec = Jvec.flatten()
 Ms = 1.09817e6    # A/m
 Aex = 1.6e-11     # J/m
 Ku = 5.9e5        # J/m^3
-Dint = 2.8e-3     # mJ/m^2
+Dint = 2.8e-3     # J/m^2
 Je = 5e11         # A/m^2
 
 llg = LLG_STT_GPU(mesh, Ms, gamma=2.211e5, alpha=0.02, do_precess=1) 
