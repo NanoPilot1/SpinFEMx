@@ -93,16 +93,18 @@ Jvec = Jvec.flatten()
 
 # 4. Material parameters (typical for Permalloy)
 
-Ms = 1.09817e6
+Ms = 1.09817e6    # A/m
+Aex = 1.6e-11     # J/m
+Ku = 5.9e5        # J/m^3
+Dint = 2.8e-3     # mJ/m^2
+Je = 5e11         # A/m^2
 
+llg = LLG_STT_GPU(mesh, Ms, gamma=2.211e5, alpha=0.02, do_precess=1) 
 
-llg = LLG_STT_GPU(mesh, 1.09817e6, gamma=2.211e5, alpha=0.02, do_precess=1) 
-
-
-llg.add_exchange(Aex=1.6e-11)
-llg.add_anisotropy(5.9e5, uvec )
-llg.add_dmi_interfacial(2.8e-3, uvec )
-llg.add_current(Jmagnitude=5e11, Jdir_vec=Jvec , P=0.5, beta=0.5)
+llg.add_exchange(Aex= Aex)
+llg.add_anisotropy(Ku, uvec )
+llg.add_dmi_interfacial(Dint, uvec )
+llg.add_current(Jmagnitude=Je , Jdir_vec=Jvec , P=0.5, beta=0.5)
 
 # The values ​​of alpha, beta, and P were obtained from the curvature-induced effects on the movement of skyrmions along curved nanotubes.
 
@@ -110,7 +112,7 @@ llg.add_current(Jmagnitude=5e11, Jdir_vec=Jvec , P=0.5, beta=0.5)
 
 
 t0 = 0.0                  # Initial time of the simulation
-t_final = 90e-9            # Final time of the simulation If the stopping_dmdt is not reached
+t_final = 90e-9           # Final time of the simulation 
 dt_init = 1.0e-14         # Initial time step
 
 dt_print = 5.00e-10        # simulated-time interval between solver log outputs (monitoring)
