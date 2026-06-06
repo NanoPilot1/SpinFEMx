@@ -9,6 +9,7 @@ __all__ = [
     "LLG_STT",
     "EnergyMinimizer",
     "ZhangLi",
+    "LLG_SOT",
 ]
 
 
@@ -28,5 +29,9 @@ def __getattr__(name: str):
     if name == "ZhangLi":
         from .Zhang_Li import ZhangLi
         return ZhangLi
+
+    if name == "LLG_SOT":
+        from .llg_SOT_module import LLG_SOT
+        return LLG_SOT
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
