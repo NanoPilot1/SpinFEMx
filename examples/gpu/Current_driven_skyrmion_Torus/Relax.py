@@ -84,10 +84,10 @@ uaxis = uvec.flatten()
 
 # 3. Material parameters 
 
-Ms = 1.09817e6
-Aex = 1.6e-11
-Dint = 2.8e-3
-Ku = 5.9e5
+Ms = 1.09817e6      # A/m
+Aex = 1.6e-11       # J/m
+Dint = 2.8e-3       # J/m^2
+Ku = 5.9e5          # J/m^3
 
 
 # 4. Build solver and interactions
