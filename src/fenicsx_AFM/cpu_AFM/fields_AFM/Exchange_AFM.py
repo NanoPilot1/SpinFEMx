@@ -7,7 +7,8 @@ from mpi4py import MPI
 
 class ExchangeField:
     """
-    Full two-sublattice AFM exchange operator for a bipartite  AFM.
+    Full two-sublattice AFM exchange operator for a bipartite  AFM. The continuum exchange model follows the two-sublattice formulation
+described by Moreels et al., "mumax+: extensible GPU-accelerated micromagnetics and beyond", npj Computational Materials 12, 71 (2026).
 
     Energy
 
