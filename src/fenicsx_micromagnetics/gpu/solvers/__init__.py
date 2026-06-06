@@ -8,6 +8,7 @@ __all__ = [
     "LLG_GPU",
     "LLG_STT_GPU",
     "EnergyMinimizerGPU",
+    "LLG_SOT_GPU",
 ]
 
 
@@ -23,6 +24,9 @@ def __getattr__(name: str):
     if name == "EnergyMinimizerGPU":
         from .Minimizer_GPU import EnergyMinimizerGPU
         return EnergyMinimizerGPU
-    
+        
+    if name == "LLG_SOT_GPU":
+        from .llg_SOT_module_GPU import LLG_SOT_GPU
+        return LLG_SOT_GPU   
     
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
