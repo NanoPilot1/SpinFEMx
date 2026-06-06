@@ -11,6 +11,7 @@ from .io_utils import load_mesh_xdmf
 __all__ = [
     "LLG_GPU",
     "LLG_STT_GPU",
+    "LLG_SOT_GPU",
     "EnergyMinimizerGPU",
     "ExchangeField",
     "AnisotropyField",
@@ -30,7 +31,11 @@ def __getattr__(name: str):
     if name == "LLG_STT_GPU":
         from .solvers.llg_stt_module_GPU import LLG_STT_GPU
         return LLG_STT_GPU
-
+        
+    if name == "LLG_SOT_GPU":
+        from .solvers.llg_SOT_module_GPU import LLG_SOT_GPU
+        return LLG_SOT_GPU   
+    
     if name == "EnergyMinimizerGPU":
         from .solvers.Minimizer_GPU import EnergyMinimizerGPU
         return EnergyMinimizerGPU
