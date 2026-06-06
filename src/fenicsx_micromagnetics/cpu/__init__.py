@@ -18,6 +18,7 @@ __all__ = [
     "DemagField",
     "make_demag_field",
     "available_demag_methods",
+    "LLG_SOT",
 ]
 
 
@@ -29,6 +30,10 @@ def __getattr__(name: str):
     if name == "LLG_STT":
         from .solvers.llg_stt_module import LLG_STT
         return LLG_STT
+        
+    if name == "LLG_SOT":
+        from .solvers.llg_SOT_module import LLG_SOT
+        return LLG_SOT
 
     if name == "EnergyMinimizer":
         from .solvers.Minimizer import EnergyMinimizer
