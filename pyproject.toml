@@ -31,6 +31,9 @@ dev = [
     "black"
 ]
 
+[project.scripts]
+print_statistic = "fenicsx_micromagnetics.utils.mesh_statistics_cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = [
