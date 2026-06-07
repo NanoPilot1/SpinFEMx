@@ -23,8 +23,6 @@ class ExchangeField:
         self.K = assemble_matrix(fem.form(self.a))
         self.K.assemble()
 
-        print(type(self.K))  
-
         self.H_exch = fem.Function(self.V)
         prefactor = fem.Function(self.V)
         prefactor.x.array[:] = -2 * self.A /Nodal_V[:]/ (self.mu_0 * self.M_s) / 1e-18
