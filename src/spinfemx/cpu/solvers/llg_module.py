@@ -1749,6 +1749,9 @@ class LLG:
 
             def default_monitor(ts_, step, t, u, hef_, mesh_):
 
+                u.copy(hef_.m.x.petsc_vec)
+                hef_.m.x.scatter_forward()
+
                 dt_ts = ts_.getTimeStep()
 
                 Exch = hef_.exchange_field.Energy(hef_.m)
