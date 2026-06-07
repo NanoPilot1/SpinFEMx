@@ -24,7 +24,7 @@ from mpi4py import MPI
 import numpy as np
 import dolfinx
 from dolfinx import fem
-from fenicsx_micromagnetics.gpu import LLG_GPU, load_mesh_xdmf
+from spinfemx.gpu import LLG_GPU, load_mesh_xdmf
 
 comm = MPI.COMM_WORLD
 

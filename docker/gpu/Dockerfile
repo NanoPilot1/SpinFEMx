@@ -347,19 +347,19 @@ RUN if [ "${INSTALL_JAX}" = "true" ]; then \
     fi
 
 # -----------------------------------------------------------------------------
-# FEniCSx-Micromagnetics package for the GPU image
+# SpinFEMx package for the GPU image
 #
 # The standard pyproject.toml installs the CPU backend only.
 # The full src tree is also exposed through PYTHONPATH so that the experimental
 # GPU backend can be imported inside this Docker image.
 # -----------------------------------------------------------------------------
-WORKDIR /opt/projects/FEniCSx-Micromagnetics
+WORKDIR /opt/projects/SpinFEMx
 
 COPY . .
 
 RUN python -m pip install -e .
 
-ENV PYTHONPATH=/opt/projects/FEniCSx-Micromagnetics/src:${PYTHONPATH}
+ENV PYTHONPATH=/opt/projects/SpinFEMx/src:${PYTHONPATH}
 
 # -----------------------------------------------------------------------------
 # Build-level verification

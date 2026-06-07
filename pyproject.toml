@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fenicsx-micromagnetics"
-version = "0.1.0"
+name = "spinfemx"
+version = "0.2.0a1"
 description = "Micromagnetic simulations with FEniCSx"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,16 +32,19 @@ dev = [
 ]
 
 [project.scripts]
-print_statistic = "fenicsx_micromagnetics.utils.mesh_statistics_cli:main"
+spinfemx-mesh-stats = "spinfemx.utils.mesh_statistics_cli:main"
+print_statistic = "spinfemx.utils.mesh_statistics_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = [
-    "fenicsx_micromagnetics",
-    "fenicsx_micromagnetics.cpu",
-    "fenicsx_micromagnetics.cpu.*"
+    "spinfemx",
+    "spinfemx.cpu",
+    "spinfemx.cpu.*",
+    "spinfemx.utils",
+    "spinfemx.utils.*"
 ]
 exclude = [
-    "fenicsx_micromagnetics.gpu",
-    "fenicsx_micromagnetics.gpu.*"
+    "spinfemx.gpu",
+    "spinfemx.gpu.*"
 ]

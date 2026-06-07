@@ -1,5 +1,5 @@
 """
-GPU field terms for FEniCSx-Micromagnetics.
+GPU field terms for SpinFEMx.
 """
 
 from __future__ import annotations

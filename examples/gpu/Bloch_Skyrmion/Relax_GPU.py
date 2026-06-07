@@ -16,7 +16,7 @@ We consider that the bloch skyrmion is  stabilized in a disk with R = 50 nm and 
 
 from mpi4py import MPI
 import numpy as np
-from fenicsx_micromagnetics.gpu import LLG_GPU, load_mesh_xdmf
+from spinfemx.gpu import LLG_GPU, load_mesh_xdmf
 
 
 comm = MPI.COMM_WORLD

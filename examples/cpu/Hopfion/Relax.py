@@ -25,7 +25,7 @@ Run:
 from mpi4py import MPI
 import numpy as np
 import dolfinx
-from fenicsx_micromagnetics.cpu import LLG, load_mesh_xdmf
+from spinfemx.cpu import LLG, load_mesh_xdmf
 from pathlib import Path
 import adios4dolfinx as ad
 

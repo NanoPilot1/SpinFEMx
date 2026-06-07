@@ -33,7 +33,7 @@ Run:
 from mpi4py import MPI
 import numpy as np
 import dolfinx
-from fenicsx_micromagnetics.cpu import LLG_STT
+from spinfemx.cpu import LLG_STT
 from pathlib import Path
 import adios4dolfinx as ad
 

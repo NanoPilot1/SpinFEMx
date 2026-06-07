@@ -4,7 +4,7 @@ import numpy as np
 import dolfinx
 from dolfinx import fem
 
-from fenicsx_micromagnetics.gpu import LLG_GPU, load_mesh_xdmf
+from spinfemx.gpu import LLG_GPU, load_mesh_xdmf
 import adios4dolfinx as ad
 
 # 1.  Load mesh (assumed to be in meters):

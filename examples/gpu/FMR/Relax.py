@@ -12,7 +12,7 @@ for faster convergence.
 We consider that the uniform in plane state is stabilized in a disk of R = 50 nm and L = 4 nm
 
 """
-from fenicsx_micromagnetics.gpu import LLG_GPU, load_mesh_xdmf
+from spinfemx.gpu import LLG_GPU, load_mesh_xdmf
 from mpi4py import MPI
 import dolfinx
 import numpy as np
