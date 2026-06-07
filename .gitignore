@@ -14,7 +14,6 @@ dist/
 *.log
 results/
 outputs/
-checkpoints/
 
 # Visualization and simulation outputs
 *.bp/
