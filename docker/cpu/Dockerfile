@@ -305,7 +305,7 @@ PY
 # -----------------------------------------------------------------------------
 # CPU project
 # -----------------------------------------------------------------------------
-WORKDIR /opt/projects/FEniCSx-Micromagnetics
+WORKDIR /opt/projects/SpinFEMx
 
 COPY . .
 
@@ -359,14 +359,14 @@ print("dolfinx:", dolfinx.__version__)
 print("PETSc:", PETSc.Sys.getVersion())
 
 try:
-    import fenicsx_micromagnetics
-    import fenicsx_micromagnetics.cpu as fxm_cpu
+    import spinfemx
+    import spinfemx.cpu as fxm_cpu
 
-    print("fenicsx_micromagnetics:", getattr(fenicsx_micromagnetics, "__file__", "no __file__"))
-    print("fenicsx_micromagnetics.cpu:", getattr(fxm_cpu, "__file__", "no __file__"))
+    print("spinfemx:", getattr(spinfemx, "__file__", "no __file__"))
+    print("spinfemx.cpu:", getattr(fxm_cpu, "__file__", "no __file__"))
 
 except Exception as e:
-    print("fenicsx_micromagnetics import failed:", repr(e))
+    print("spinfemx import failed:", repr(e))
 
 print("Final CPU image verification completed.")
 PY

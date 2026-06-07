@@ -28,7 +28,7 @@ import numpy as np
 import dolfinx
 from dolfinx import fem
 from pathlib import Path
-from fenicsx_micromagnetics.cpu import LLG, load_mesh_xdmf
+from spinfemx.cpu import LLG, load_mesh_xdmf
 
 
 comm = MPI.COMM_WORLD

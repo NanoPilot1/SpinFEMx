@@ -18,7 +18,7 @@ Threading recommendations (avoid oversubscription when using MPI):
 
 
 """
-from fenicsx_micromagnetics.cpu import LLG, load_mesh_xdmf
+from spinfemx.cpu import LLG, load_mesh_xdmf
 from mpi4py import MPI
 import dolfinx
 import numpy as np

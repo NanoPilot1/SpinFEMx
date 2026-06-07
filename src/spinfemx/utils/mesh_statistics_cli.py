@@ -451,7 +451,7 @@ def _histogram_lines(
 def format_report(stats: MeshStats) -> str:
     """Return a terminal report with a project-specific layout."""
     lines = [
-        "FEniCSx-Micromagnetics :: mesh diagnostic report",
+        "SpinFEMx :: mesh diagnostic report",
         "-----------------------------------------------------------------------",
         f"source file        : {stats.mesh_path}",
         f"grid identifier    : {stats.mesh_name}",
@@ -517,7 +517,7 @@ def format_report(stats: MeshStats) -> str:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="print_statistic",
+        prog="spinfemx-mesh-stats",
         description=(
             "Print simplex-shape and edge-size diagnostics for a "
             "DOLFINx triangular or tetrahedral XDMF mesh."

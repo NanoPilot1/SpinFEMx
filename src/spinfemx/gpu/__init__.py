@@ -1,5 +1,5 @@
 """
-Experimental CUDA/GPU backend for FEniCSx-Micromagnetics.
+Experimental CUDA/GPU backend for SpinFEMx.
 
 This backend is intended to be used through the GPU Docker image.
 It is not installed by the default CPU Python package.

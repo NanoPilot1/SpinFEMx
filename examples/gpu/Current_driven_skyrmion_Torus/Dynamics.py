@@ -22,7 +22,7 @@ The simulation evolves the magnetization in time to analyze the current-induced 
 from mpi4py import MPI
 import numpy as np
 import dolfinx
-from fenicsx_micromagnetics.gpu import LLG_STT_GPU, load_mesh_xdmf
+from spinfemx.gpu import LLG_STT_GPU, load_mesh_xdmf
 from pathlib import Path
 import adios4dolfinx as ad
 

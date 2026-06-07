@@ -1,5 +1,5 @@
 """
-CPU solvers for FEniCSx-Micromagnetics.
+CPU solvers for SpinFEMx.
 """
 
 from __future__ import annotations
