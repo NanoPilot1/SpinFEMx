@@ -73,6 +73,27 @@ def _sync_vec_to_function(vec: PETSc.Vec, fun: fem.Function) -> fem.Function:
     return fun
 
 
+def _require_single_rank_gpu(mesh, backend_name: str) -> None:
+    """Reject unsupported multi-rank execution for the single-GPU backend.
+
+    The current CUDA implementation is intentionally restricted to one Python
+    process and one GPU.  Checking MPI.COMM_WORLD as well as mesh.comm catches
+    accidental ``mpiexec -n > 1`` launches even when a mesh was created with
+    MPI.COMM_SELF.
+    """
+    world_size = int(MPI.COMM_WORLD.size)
+    mesh_size = int(mesh.comm.size)
+
+    if world_size != 1 or mesh_size != 1:
+        raise RuntimeError(
+            f"{backend_name} supports only single-rank GPU execution. "
+            f"Detected MPI.COMM_WORLD.size={world_size} and "
+            f"mesh.comm.size={mesh_size}. Run with:\n\n"
+            "    python your_script.py\n\n"
+            "Do not use mpiexec or mpirun with -n > 1."
+        )
+
+
 
 # Fused CuPy kernels for hot local algebra
 
@@ -386,9 +407,11 @@ class EffectiveField:
         H0_static=None,
         H_time_func=None,
     ):
+        _require_single_rank_gpu(mesh, "EffectiveField")
+
         self.mesh = mesh
         self.comm = mesh.comm
-        self.V = fem.functionspace(mesh, ("Lagrange", 1, (mesh.geometry.dim,)))
+        self.V = fem.functionspace(mesh, ("Lagrange", 1, (3,)))
         self.V1 = fem.functionspace(mesh, ("Lagrange", 1))
 
         self.Ms = float(Ms)
@@ -427,7 +450,7 @@ class EffectiveField:
         # In the common single-rank GPU path, the edge endpoints are also kept
         # on the device so max_neighbor_angle_deg_gpu() avoids CPU transfers.
         self.neighbor_pairs_host = self._build_neighbor_pairs()
-        if self.comm.size == 1 and self.neighbor_pairs_host.size:
+        if self.neighbor_pairs_host.size:
             self.neighbor_i_gpu = cp.asarray(
                 self.neighbor_pairs_host[:, 0],
                 dtype=cp.int32,
@@ -478,6 +501,8 @@ class EffectiveField:
         # (name, field_object, work_vector). field_object must provide
         # compute_vec(x_vec, out_vec).
         self.local_terms: list[tuple[str, object, PETSc.Vec]] = []
+        # Host matrices used only once to assemble the combined sparse CUDA operator.
+        cpu_lin_mats = []
         self.cubic_field = None
         self.H_cubic_gpu = None
 
@@ -488,6 +513,7 @@ class EffectiveField:
 
         if abs(self.A) > 0.0:
             self.exchange_field = ExchangeField(self.mesh, self.V, self.A, self.Ms, volN)
+            cpu_lin_mats.append(self.exchange_field.K)
             self.exchange_field.K = _set_mat_cuda(self.exchange_field.K)
             buf = self.exchange_field.K.createVecLeft()
             _set_vec_cuda(buf, block_size=3)
@@ -505,6 +531,7 @@ class EffectiveField:
             # - nodal anisotropy is matrix-free and provides
             #   compute_vec(...), Energy_lumped_gpu(...), diagonal_vec(...).
             if hasattr(self.anisotropy_field, "K"):
+                cpu_lin_mats.append(self.anisotropy_field.K)
                 self.anisotropy_field.K = _set_mat_cuda(self.anisotropy_field.K)
                 buf = self.anisotropy_field.K.createVecLeft()
                 _set_vec_cuda(buf, block_size=3)
@@ -531,6 +558,7 @@ class EffectiveField:
             if DMIBULK is None:
                 raise NotImplementedError("DMI_Bulk_GPU is not available. Provide it or set D_bulk=0.")
             self.DMIBULK = DMIBULK(self.mesh, self.V, self.V1, self.D_bulk, self.Ms, volN)
+            cpu_lin_mats.append(self.DMIBULK.K)
             self.DMIBULK.K = _set_mat_cuda(self.DMIBULK.K)
             buf = self.DMIBULK.K.createVecLeft()
             _set_vec_cuda(buf, block_size=3)
@@ -541,6 +569,7 @@ class EffectiveField:
 
         if abs(self.D_int) > 0.0:
             self.DMI_int = DMIInterfacial(self.mesh, self.V, self.V1, self.D_int, n0_int_vec, self.Ms, volN)
+            cpu_lin_mats.append(self.DMI_int.K)
             self.DMI_int.K = _set_mat_cuda(self.DMI_int.K)
             buf = self.DMI_int.K.createVecLeft()
             _set_vec_cuda(buf, block_size=3)
@@ -564,6 +593,27 @@ class EffectiveField:
                 u2=u2_cub,
                 VolN=volN,
             )
+
+
+        # Combine sparse linear magnetic operators once.  Per-field matrices
+        # are retained for diagnostics and energy decomposition.  The hot RHS
+        # and Jv paths use one cuSPARSE matvec whenever several sparse terms
+        # are active.  With exactly one sparse term, reuse its CUDA matrix
+        # directly to avoid an unnecessary GPU allocation.
+        if len(cpu_lin_mats) == 0:
+            self.K_lin = None
+        elif len(cpu_lin_mats) == 1:
+            self.K_lin = self.linear_terms[0][1]
+        else:
+            K_lin_cpu = cpu_lin_mats[0].copy()
+            for Kc in cpu_lin_mats[1:]:
+                K_lin_cpu.axpy(
+                    1.0,
+                    Kc,
+                    structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN,
+                )
+            K_lin_cpu.assemble()
+            self.K_lin = _set_mat_cuda(K_lin_cpu)
 
         # -------------------------------------------------------------
         # If there are no linear terms, allow demag-only.
@@ -682,24 +732,36 @@ class EffectiveField:
 
 
     def _build_neighbor_pairs(self):
-        """
-        Build unique pairs of neighboring P1 nodes connected by mesh edges.
+        """Build unique mesh-edge pairs for first-order simplex meshes.
 
-        The scalar P1 space V1 and the blocked vector P1 space V share the same
-        nodal ordering. For tetrahedra this produces the six edges per cell;
-        duplicate edges are removed once during initialization.
+        The magnetic space is a blocked three-component P1 space.  Its cell
+        dofs index the nodal vectors stored by ``m.reshape((-1, 3))`` directly,
+        so the diagnostic does not depend on a separate scalar-space ordering.
         """
         tdim = self.mesh.topology.dim
         cell_map = self.mesh.topology.index_map(tdim)
-        n_cells = int(cell_map.size_local + cell_map.num_ghosts)
+        if cell_map is None:
+            raise RuntimeError("Missing cell index map.")
 
+        if self.V.dofmap.index_map_bs != 3:
+            raise RuntimeError(
+                "Expected a blocked magnetic function space with three components."
+            )
+
+        n_cells = int(cell_map.size_local + cell_map.num_ghosts)
         chunks = []
 
         for cell in range(n_cells):
-            dofs = np.asarray(self.V1.dofmap.cell_dofs(cell), dtype=np.int32)
+            dofs = np.asarray(self.V.dofmap.cell_dofs(cell), dtype=np.int32)
 
-            if dofs.size < 2:
-                continue
+            # Every pair of P1 simplex vertices is an edge.  The same rule is
+            # not valid for hexahedra or prisms because it would include cell
+            # diagonals.
+            if dofs.size != tdim + 1:
+                raise NotImplementedError(
+                    "max_neighbor_angle_deg_gpu currently supports only "
+                    "first-order simplex meshes: triangles and tetrahedra."
+                )
 
             ia, ib = np.triu_indices(dofs.size, k=1)
             pairs = np.column_stack((dofs[ia], dofs[ib])).astype(
@@ -718,70 +780,44 @@ class EffectiveField:
         )
 
     def max_neighbor_angle_deg_gpu(self, m_vec: PETSc.Vec | None = None):
-        """
-        Return the global maximum angle, in degrees, between neighboring nodal
-        moments.
+        """Return the maximum angle between neighboring nodal moments.
 
-        Single-rank execution stays entirely on GPU except for transferring the
-        final scalar maximum. The MPI fallback uses the host-side Function after
-        synchronizing ghost values.
+        This diagnostic is evaluated only in the supported single-rank CUDA
+        path.  All vector algebra stays on the GPU and only the final scalar is
+        copied to the host.
         """
+        if self.comm.size != 1:
+            raise RuntimeError(
+                "max_neighbor_angle_deg_gpu() supports single-rank GPU "
+                "execution only."
+            )
+
         if self.neighbor_pairs_host.size == 0:
             return 0.0
 
         if m_vec is None:
             m_vec = self.m_gpu
 
-        if self.comm.size == 1:
-            m_all = _vec_to_cupy(m_vec, "r")
-            moments = m_all[: self.local_size].reshape((-1, 3))
+        m_all = _vec_to_cupy(m_vec, "r")
+        moments = m_all[: self.local_size].reshape((-1, 3))
 
-            mi = moments[self.neighbor_i_gpu]
-            mj = moments[self.neighbor_j_gpu]
+        mi = moments[self.neighbor_i_gpu]
+        mj = moments[self.neighbor_j_gpu]
 
-            dot = cp.sum(mi * mj, axis=1)
-            norm_product = cp.sqrt(
-                cp.sum(mi * mi, axis=1) * cp.sum(mj * mj, axis=1)
-            )
+        dot = cp.sum(mi * mj, axis=1)
+        norm_product = cp.sqrt(
+            cp.sum(mi * mi, axis=1) * cp.sum(mj * mj, axis=1)
+        )
 
-            # Ignore defensively any zero-length vectors by assigning angle 0.
-            cosine = cp.where(
-                norm_product > 1e-30,
-                dot / norm_product,
-                1.0,
-            )
-            cosine = cp.clip(cosine, -1.0, 1.0)
+        # Avoid an intermediate division by zero before applying the mask.
+        safe_norm_product = cp.maximum(norm_product, 1.0e-30)
+        cosine = dot / safe_norm_product
+        cosine = cp.where(norm_product > 1.0e-30, cosine, 1.0)
+        cosine = cp.clip(cosine, -1.0, 1.0)
 
-            local_max = float(
-                (cp.arccos(cosine) * (180.0 / np.pi)).max().item()
-            )
-            return local_max
-
-        # Conservative MPI fallback. This path is not used by the current
-        # single-GPU backend but keeps the diagnostic well-defined.
-        if m_vec is not self.m_gpu:
-            m_vec.copy(self.m_gpu)
-
-        self.sync_m_to_function()
-        self.m.x.scatter_forward()
-
-        moments = self.m.x.array.reshape((-1, 3))
-        pairs = self.neighbor_pairs_host
-
-        mi = moments[pairs[:, 0]]
-        mj = moments[pairs[:, 1]]
-
-        dot = np.einsum("ij,ij->i", mi, mj)
-        norm_product = np.linalg.norm(mi, axis=1) * np.linalg.norm(mj, axis=1)
-
-        cosine = np.ones_like(dot)
-        valid = norm_product > 1e-30
-        cosine[valid] = dot[valid] / norm_product[valid]
-        cosine = np.clip(cosine, -1.0, 1.0)
-
-        local_max = float(np.degrees(np.arccos(cosine)).max())
-        return float(self.comm.allreduce(local_max, op=MPI.MAX))
-
+        return float(
+            (cp.arccos(cosine) * (180.0 / np.pi)).max().item()
+        )
 
     # Host/device sync helpers
 
@@ -924,11 +960,10 @@ class EffectiveField:
     # -----------------------------------------------------------------
 
     def apply_linear_field_vec(self, x_vec: PETSc.Vec, out_vec: PETSc.Vec):
-        out_vec.zeroEntries()
-
-        for _, K, buf in self.linear_terms:
-            K.mult(x_vec, buf)
-            out_vec.axpy(1.0, buf)
+        if self.K_lin is not None:
+            self.K_lin.mult(x_vec, out_vec)
+        else:
+            out_vec.zeroEntries()
 
         for _, field, buf in self.local_terms:
             field.compute_vec(x_vec, buf)
@@ -1513,6 +1548,8 @@ class JvContext:
 
 class LLG_GPU:
     def __init__(self, mesh, Ms, gamma=2.211e5, alpha=0.5, do_precess=1):
+        _require_single_rank_gpu(mesh, "LLG_GPU")
+
         self.mesh = mesh
         self.Ms = Ms
         self.gamma = gamma

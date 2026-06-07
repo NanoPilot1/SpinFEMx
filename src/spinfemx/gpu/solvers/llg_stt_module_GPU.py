@@ -74,6 +74,27 @@ def _sync_vec_to_function(vec: PETSc.Vec, fun: fem.Function) -> fem.Function:
     return fun
 
 
+def _require_single_rank_gpu(mesh, backend_name: str) -> None:
+    """Reject unsupported multi-rank execution for the single-GPU backend.
+
+    The current CUDA implementation is intentionally restricted to one Python
+    process and one GPU.  Checking MPI.COMM_WORLD as well as mesh.comm catches
+    accidental ``mpiexec -n > 1`` launches even when a mesh was created with
+    MPI.COMM_SELF.
+    """
+    world_size = int(MPI.COMM_WORLD.size)
+    mesh_size = int(mesh.comm.size)
+
+    if world_size != 1 or mesh_size != 1:
+        raise RuntimeError(
+            f"{backend_name} supports only single-rank GPU execution. "
+            f"Detected MPI.COMM_WORLD.size={world_size} and "
+            f"mesh.comm.size={mesh_size}. Run with:\n\n"
+            "    python your_script.py\n\n"
+            "Do not use mpiexec or mpirun with -n > 1."
+        )
+
+
 # -----------------------------------------------------------------------------
 # Fused CuPy kernels for STT hot paths
 # -----------------------------------------------------------------------------
@@ -522,9 +543,11 @@ class EffectiveFieldSTTGPU:
         demag_kwargs=None,
         H_time_func=None,
     ):
+        _require_single_rank_gpu(mesh, "EffectiveFieldSTTGPU")
+
         self.mesh = mesh
         self.comm = mesh.comm
-        self.V = fem.functionspace(mesh, ("Lagrange", 1, (mesh.geometry.dim,)))
+        self.V = fem.functionspace(mesh, ("Lagrange", 1, (3,)))
         self.V1 = fem.functionspace(mesh, ("Lagrange", 1))
 
         self.Ms = float(Ms)
@@ -572,6 +595,23 @@ class EffectiveFieldSTTGPU:
         self.start, self.end = self.V.dofmap.index_map.local_range
         self.local_dofs = self.end - self.start
         self.local_size = 3 * self.local_dofs
+
+        # Spatial-resolution diagnostic. Build the mesh-edge list only once.
+        # In the common single-rank GPU path, the edge endpoints are also kept
+        # on the device so max_neighbor_angle_deg_gpu() avoids CPU transfers.
+        self.neighbor_pairs_host = self._build_neighbor_pairs()
+        if self.neighbor_pairs_host.size:
+            self.neighbor_i_gpu = cp.asarray(
+                self.neighbor_pairs_host[:, 0],
+                dtype=cp.int32,
+            )
+            self.neighbor_j_gpu = cp.asarray(
+                self.neighbor_pairs_host[:, 1],
+                dtype=cp.int32,
+            )
+        else:
+            self.neighbor_i_gpu = None
+            self.neighbor_j_gpu = None
 
         # -------------------------------------------------------------
         # Lumped nodal volumes
@@ -697,6 +737,7 @@ class EffectiveFieldSTTGPU:
                     Kc,
                     structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN,
                 )
+            K_lin_cpu.assemble()
             self.K_lin = _set_mat_cuda(K_lin_cpu)
 
         # -------------------------------------------------------------
@@ -809,6 +850,94 @@ class EffectiveFieldSTTGPU:
         self.m.x.array[:] = np.asarray(m0_array, dtype=np.float64)
         self.m.x.scatter_forward()
         self.m.x.petsc_vec.copy(self.m_gpu)
+
+    def _build_neighbor_pairs(self):
+        """Build unique mesh-edge pairs for first-order simplex meshes.
+
+        The magnetic space is a blocked three-component P1 space.  Its cell
+        dofs index the nodal vectors stored by ``m.reshape((-1, 3))`` directly,
+        so the diagnostic does not depend on a separate scalar-space ordering.
+        """
+        tdim = self.mesh.topology.dim
+        cell_map = self.mesh.topology.index_map(tdim)
+        if cell_map is None:
+            raise RuntimeError("Missing cell index map.")
+
+        if self.V.dofmap.index_map_bs != 3:
+            raise RuntimeError(
+                "Expected a blocked magnetic function space with three components."
+            )
+
+        n_cells = int(cell_map.size_local + cell_map.num_ghosts)
+        chunks = []
+
+        for cell in range(n_cells):
+            dofs = np.asarray(self.V.dofmap.cell_dofs(cell), dtype=np.int32)
+
+            # Every pair of P1 simplex vertices is an edge.  The same rule is
+            # not valid for hexahedra or prisms because it would include cell
+            # diagonals.
+            if dofs.size != tdim + 1:
+                raise NotImplementedError(
+                    "max_neighbor_angle_deg_gpu currently supports only "
+                    "first-order simplex meshes: triangles and tetrahedra."
+                )
+
+            ia, ib = np.triu_indices(dofs.size, k=1)
+            pairs = np.column_stack((dofs[ia], dofs[ib])).astype(
+                np.int32,
+                copy=False,
+            )
+            pairs.sort(axis=1)
+            chunks.append(pairs)
+
+        if not chunks:
+            return np.empty((0, 2), dtype=np.int32)
+
+        return np.unique(np.vstack(chunks), axis=0).astype(
+            np.int32,
+            copy=False,
+        )
+
+    def max_neighbor_angle_deg_gpu(self, m_vec: PETSc.Vec | None = None):
+        """Return the maximum angle between neighboring nodal moments.
+
+        This diagnostic is evaluated only in the supported single-rank CUDA
+        path.  All vector algebra stays on the GPU and only the final scalar is
+        copied to the host.
+        """
+        if self.comm.size != 1:
+            raise RuntimeError(
+                "max_neighbor_angle_deg_gpu() supports single-rank GPU "
+                "execution only."
+            )
+
+        if self.neighbor_pairs_host.size == 0:
+            return 0.0
+
+        if m_vec is None:
+            m_vec = self.m_gpu
+
+        m_all = _vec_to_cupy(m_vec, "r")
+        moments = m_all[: self.local_size].reshape((-1, 3))
+
+        mi = moments[self.neighbor_i_gpu]
+        mj = moments[self.neighbor_j_gpu]
+
+        dot = cp.sum(mi * mj, axis=1)
+        norm_product = cp.sqrt(
+            cp.sum(mi * mi, axis=1) * cp.sum(mj * mj, axis=1)
+        )
+
+        # Avoid an intermediate division by zero before applying the mask.
+        safe_norm_product = cp.maximum(norm_product, 1.0e-30)
+        cosine = dot / safe_norm_product
+        cosine = cp.where(norm_product > 1.0e-30, cosine, 1.0)
+        cosine = cp.clip(cosine, -1.0, 1.0)
+
+        return float(
+            (cp.arccos(cosine) * (180.0 / np.pi)).max().item()
+        )
 
     def sync_m_to_function(self):
         return _sync_vec_to_function(self.m_gpu, self.m)
@@ -1210,6 +1339,8 @@ class JvContextSTT:
 
 class LLG_STT_GPU:
     def __init__(self, mesh, Ms, gamma=2.211e5, alpha=0.5, do_precess=1):
+        _require_single_rank_gpu(mesh, "LLG_STT_GPU")
+
         self.mesh = mesh
         self.Ms = float(Ms)
         self.gamma = float(gamma)
@@ -1553,6 +1684,9 @@ class LLG_STT_GPU:
 
                 energy = hef_.compute_Energy_terms()
 
+                # GPU spatial-resolution diagnostic, evaluated only at log time.
+                max_neighbor_angle_deg = hef_.max_neighbor_angle_deg_gpu(u)
+
                 n_snap = int(np.trunc(t / dt_snap))
                 if n_snap != last_snap_n["n"]:
                     last_snap_n["n"] = n_snap
@@ -1588,6 +1722,7 @@ class LLG_STT_GPU:
                             f"{'time':>10} {'dt':>10} "
                             f"{'<mx>':>15} {'<my>':>15} {'<mz>':>15} "
                             f"{'maxdmdt(deg/ns)':>18} "
+                            f"{'max_nn_angle(deg)':>18} "
                             f"{'E_demag':>15} {'E_exch':>15} {'E_ani':>15} "
                             f"{'E_dmi_bulk':>15} {'E_dmi_int':>15} {'E_total':>15}"
                         )
@@ -1602,6 +1737,7 @@ class LLG_STT_GPU:
                         f"{mag[:,1].mean():15.6f} "
                         f"{mag[:,2].mean():15.6f} "
                         f"{maxdmdt_deg_ns:18.6e} "
+                        f"{max_neighbor_angle_deg:18.6f} "
                         f"{energy['E_demag']:15.4e} "
                         f"{energy['E_exch']:15.4e} "
                         f"{energy['E_ani']:15.4e} "
@@ -1799,6 +1935,9 @@ class LLG_STT_GPU:
 
                 energy = hef_.compute_Energy_terms()
 
+                # GPU spatial-resolution diagnostic, evaluated only at log time.
+                max_neighbor_angle_deg = hef_.max_neighbor_angle_deg_gpu(u)
+
 
                 n_snap = int(np.trunc(t / dt_snap))
                 if n_snap != last_snap_n["n"]:
@@ -1836,6 +1975,7 @@ class LLG_STT_GPU:
                             f"{'time':>10} {'dt':>10} "
                             f"{'<mx>':>15} {'<my>':>15} {'<mz>':>15} "
                             f"{'maxdmdt(deg/ns)':>18} "
+                            f"{'max_nn_angle(deg)':>18} "
                             f"{'E_demag':>15} {'E_exch':>15} {'E_ani':>15} "
                             f"{'E_dmi_bulk':>15} {'E_dmi_int':>15} {'E_total':>15}"
                         )
@@ -1850,6 +1990,7 @@ class LLG_STT_GPU:
                         f"{mag[:,1].mean():15.6f} "
                         f"{mag[:,2].mean():15.6f} "
                         f"{maxdmdt_deg_ns:18.6e} "
+                        f"{max_neighbor_angle_deg:18.6f} "
                         f"{energy['E_demag']:15.4e} "
                         f"{energy['E_exch']:15.4e} "
                         f"{energy['E_ani']:15.4e} "
